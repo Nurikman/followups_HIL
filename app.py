@@ -4,9 +4,27 @@ import json
 import os
 import openai
 import nltk
+import asyncio
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import hashlib
+
+# Import agents for followup generation
+try:
+    from agents.chat_segmenter_rater import (
+        make_agent_chat_segmenter_rater,
+        SegmenterRaterDeps,
+        ConversationSegment
+    )
+    from agents.conversation_starter_generator import (
+        make_agent_conversation_starter_generator,
+        StarterGeneratorDeps,
+        ConversationStarter
+    )
+    AGENTS_AVAILABLE = True
+except ImportError:
+    st.warning("⚠️ Agent modules not found. Using fallback followup generation.")
+    AGENTS_AVAILABLE = False
 
 # Download required NLTK data
 try:
@@ -394,6 +412,108 @@ Where start_idx and end_idx are 0-based message indices between 0 and {total_mes
         
         return summaries, segments
 
+class FollowupGenerator:
+    """Generate followups using the agent-based system from workflow_read_file.py"""
+    
+    def __init__(self, model_name="gpt-4o"):
+        self.model_name = model_name
+        if AGENTS_AVAILABLE:
+            self.agent_segmenter_rater = make_agent_chat_segmenter_rater(model_name=model_name)
+            self.agent_starter_generator = make_agent_conversation_starter_generator(model_name=model_name)
+    
+    def format_conversation_for_agents(self, conversation: List[Dict]) -> str:
+        """Convert Streamlit conversation format to agent-expected format."""
+        conversation_lines = []
+        
+        for msg in conversation:
+            # Convert to agent format: "speaker: message"
+            if msg['speaker'].lower() == 'agent':
+                conversation_lines.append(f"agent: {msg['message']}")
+            elif msg['speaker'].lower() in ['user', 'user 2']:
+                conversation_lines.append(f"user: {msg['message']}")
+            else:
+                # Handle other speaker types
+                speaker_type = "agent" if "agent" in msg['speaker'].lower() else "user"
+                conversation_lines.append(f"{speaker_type}: {msg['message']}")
+        
+        return '\n'.join(conversation_lines)
+    
+    async def generate_followups_with_agents(self, conversation: List[Dict]) -> List[str]:
+        """Generate followups using the agent-based system."""
+        if not AGENTS_AVAILABLE:
+            return self.generate_fallback_followups()
+        
+        try:
+            # Set up environment for agents to access OpenAI API key
+            if hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key:
+                os.environ['OPENAI_API_KEY'] = st.session_state.openai_api_key
+            elif not os.getenv('OPENAI_API_KEY'):
+                st.warning("⚠️ No OpenAI API key available for agents. Using fallback followups.")
+                return self.generate_fallback_followups()
+            
+            # Format conversation for agents
+            formatted_conversation = self.format_conversation_for_agents(conversation)
+            
+            # Step 1: Segment and rate conversation
+            deps = SegmenterRaterDeps(conversation=formatted_conversation)
+            result = await self.agent_segmenter_rater.run("Please analyze this conversation.", deps=deps)
+            segments = result.data.segments
+            
+            # Get top 3 segments by combined score
+            top_segments = sorted(segments, key=lambda x: x.combined_score, reverse=True)[:3]
+            
+            # Step 2: Generate conversation starters
+            starter_deps = StarterGeneratorDeps(top_segments=top_segments)
+            starter_result = await self.agent_starter_generator.run(deps=starter_deps)
+            starters = starter_result.data
+            
+            # Convert ConversationStarter objects to strings
+            followup_strings = [starter.starter for starter in starters[:5]]  # Take top 5
+            
+            return followup_strings
+            
+        except Exception as e:
+            st.error(f"Agent-based followup generation failed: {str(e)}")
+            return self.generate_fallback_followups()
+    
+    def generate_followups_sync(self, conversation: List[Dict]) -> List[str]:
+        """Synchronous wrapper for async followup generation."""
+        if not AGENTS_AVAILABLE:
+            return self.generate_fallback_followups()
+            
+        try:
+            # Try to run in new event loop
+            return asyncio.run(self.generate_followups_with_agents(conversation))
+        except RuntimeError as e:
+            if "cannot be called from a running event loop" in str(e):
+                # We're in an existing event loop, try different approach
+                try:
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                    return asyncio.run(self.generate_followups_with_agents(conversation))
+                except ImportError:
+                    st.warning("⚠️ nest_asyncio not available. Using fallback followups.")
+                    return self.generate_fallback_followups()
+                except Exception as e:
+                    st.error(f"Nested async execution failed: {str(e)}")
+                    return self.generate_fallback_followups()
+            else:
+                st.error(f"Async execution failed: {str(e)}")
+                return self.generate_fallback_followups()
+        except Exception as e:
+            st.error(f"Followup generation failed: {str(e)}")
+            return self.generate_fallback_followups()
+    
+    def generate_fallback_followups(self) -> List[str]:
+        """Generate fallback follow-ups when agents are not available."""
+        return [
+            "I hope you feel better soon! Is there anything specific you'd like me to help you with while you recover?",
+            "Would you like me to look up some remedies for cold symptoms that might help you feel better?",
+            "Since the weather is quite variable, would you like me to send you daily weather updates while you're feeling unwell?",
+            "Have you been able to rest well? Good sleep is really important when fighting off a cold.",
+            "Would you like me to remind you to take your medication or suggest some warm drinks that might soothe your throat?"
+        ]
+
 class DataStorage:
     """Handle data storage for user interactions and feedback."""
     
@@ -504,23 +624,18 @@ def display_interactive_segment_summaries(segment_summaries: List[Dict], segment
                 session_data['selected_segment'] = None
                 st.rerun()
 
-def generate_mock_follow_ups() -> List[str]:
-    """Generate mock follow-ups for testing purposes."""
-    return [
-        "I hope you feel better soon! Is there anything specific you'd like me to help you with while you recover?",
-        "Would you like me to look up some remedies for cold symptoms that might help you feel better?",
-        "Since the weather is quite variable, would you like me to send you daily weather updates while you're feeling unwell?",
-        "Have you been able to rest well? Good sleep is really important when fighting off a cold.",
-        "Would you like me to remind you to take your medication or suggest some warm drinks that might soothe your throat?"
-    ]
+def generate_intelligent_follow_ups(conversation: List[Dict], followup_generator: FollowupGenerator) -> List[str]:
+    """Generate intelligent follow-ups using the agent-based system."""
+    return followup_generator.generate_followups_sync(conversation)
 
 def main():
     """Main Streamlit application."""
     
-    # Initialize data storage and summary generator
+    # Initialize data storage, summary generator, and followup generator
     storage = DataStorage()
     session_data = storage.get_session_data()
     summary_generator = SummaryGenerator()
+    followup_generator = FollowupGenerator()
     
     # Header
     st.title("🤖 Agentic Follow-up Rating System")
@@ -594,20 +709,31 @@ def main():
                         
                         session_data['segment_summaries'] = summaries
                         session_data['segments'] = valid_segments
-                        session_data['follow_ups'] = generate_mock_follow_ups()
+                        
+                        # Generate intelligent follow-ups using agents
+                        with st.spinner("Generating intelligent follow-ups..."):
+                            session_data['follow_ups'] = generate_intelligent_follow_ups(conversation, followup_generator)
                         
                         # Log summary generation
                         storage.log_interaction({
-                            'action': 'segment_summaries_generated',
+                            'action': 'conversation_processed',
                             'conversation_length': len(conversation),
                             'number_of_segments': len(valid_segments),
                             'invalid_segments': len(segments) - len(valid_segments),
+                            'number_of_followups': len(session_data['follow_ups']),
+                            'agents_available': AGENTS_AVAILABLE,
                             'has_api_key': bool(hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key)
                         })
                         
-                        st.success(f"✅ Conversation processed with {len(valid_segments)} valid segment-based AI summaries!")
+                        # Success message based on available systems
+                        followup_method = "intelligent agent-based" if AGENTS_AVAILABLE else "fallback"
+                        st.success(f"✅ Conversation processed with {len(valid_segments)} valid segments and {len(session_data['follow_ups'])} {followup_method} follow-ups!")
+                        
                         if len(segments) != len(valid_segments):
                             st.warning(f"⚠️ Filtered out {len(segments) - len(valid_segments)} invalid segments that exceeded conversation bounds")
+                            
+                        if not AGENTS_AVAILABLE:
+                            st.info("💡 Install agent modules for intelligent followup generation")
                         st.rerun()
             else:
                 st.error("❌ No valid conversation messages found in the file")
@@ -628,6 +754,7 @@ def main():
             
             st.write(f"**Summaries generated**: {'✅' if session_data['segment_summaries'] else '❌'}")
             st.write(f"**Follow-ups generated**: {'✅' if session_data['follow_ups'] else '❌'}")
+            st.write(f"**Agent system**: {'✅ Available' if AGENTS_AVAILABLE else '❌ Using fallback'}")
     
     # Main content area
     if session_data['conversation'] and session_data['follow_ups']:
