@@ -2,8 +2,23 @@ import streamlit as st
 import re
 import json
 import os
+import openai
+import nltk
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
+import hashlib
+
+# Download required NLTK data
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab')
+    
+# Fallback for older NLTK versions
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
 
 # Configure Streamlit page
 st.set_page_config(
@@ -44,6 +59,81 @@ class ConversationParser:
         
         return conversations
 
+class SummaryGenerator:
+    """Generate AI-powered summaries with sentence-to-source mapping."""
+    
+    def __init__(self):
+        self.summary_prompt = """Could you please provide a summary of a given dialogue, including all key points and supporting details? The summary should be comprehensive and accurately reflect the main message and arguments presented in the original dialogue, while also being concise and easy to understand. To ensure accuracy, please read the text carefully and pay attention to any nuances or complexities in the language. Additionally, the summary should avoid any personal biases or interpretations and remain objective and factual throughout."""
+        
+    def format_conversation_for_prompt(self, conversation: List[Dict]) -> str:
+        """Format conversation for AI prompt."""
+        formatted = "DIALOGUE:\n"
+        for msg in conversation:
+            formatted += f"[{msg['timestamp']}] {msg['speaker']}: {msg['message']}\n"
+        return formatted
+    
+    def generate_summary_with_api(self, conversation: List[Dict]) -> str:
+        """Generate summary using OpenAI API."""
+        try:
+            # Check if API key is available
+            if not hasattr(st.session_state, 'openai_api_key') or not st.session_state.openai_api_key:
+                return self.generate_fallback_summary(conversation)
+            
+            client = openai.OpenAI(api_key=st.session_state.openai_api_key)
+            
+            conversation_text = self.format_conversation_for_prompt(conversation)
+            full_prompt = f"{self.summary_prompt}\n\n{conversation_text}"
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that provides accurate, objective summaries of dialogues."},
+                    {"role": "user", "content": full_prompt}
+                ],
+                max_tokens=500,
+                temperature=0.3
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            st.error(f"API Error: {str(e)}")
+            return self.generate_fallback_summary(conversation)
+    
+    
+    def map_sentences_to_sources(self, summary: str, conversation: List[Dict]) -> Dict[str, List[int]]:
+        """Map each sentence in summary to relevant conversation messages."""
+        sentences = nltk.sent_tokenize(summary)
+        sentence_mapping = {}
+        
+        for i, sentence in enumerate(sentences):
+            sentence_id = f"sent_{i}"
+            relevant_messages = []
+            
+            # Simple keyword matching to find relevant messages
+            sentence_words = set(sentence.lower().split())
+            
+            for j, msg in enumerate(conversation):
+                msg_words = set(msg['message'].lower().split())
+                
+                # Calculate word overlap
+                overlap = len(sentence_words.intersection(msg_words))
+                overlap_ratio = overlap / max(len(sentence_words), 1)
+                
+                # If there's significant overlap, consider it relevant
+                if overlap_ratio > 0.1 or overlap >= 2:
+                    relevant_messages.append(j)
+            
+            # If no matches found, assign to nearby messages based on position
+            if not relevant_messages:
+                # Assign to middle portion of conversation as fallback
+                mid_point = len(conversation) // 2
+                relevant_messages = [max(0, mid_point - 1), mid_point, min(len(conversation) - 1, mid_point + 1)]
+            
+            sentence_mapping[sentence_id] = relevant_messages
+        
+        return sentence_mapping, sentences
+
 class DataStorage:
     """Handle data storage for user interactions and feedback."""
     
@@ -63,25 +153,80 @@ class DataStorage:
             st.session_state.session_data = {
                 'conversation': [],
                 'summary': "",
+                'summary_sentences': [],
+                'sentence_mapping': {},
                 'follow_ups': [],
                 'selected_follow_up': None,
-                'user_feedback': {}
+                'user_feedback': {},
+                'selected_sentence': None
             }
         return st.session_state.session_data
 
-def generate_mock_summary(conversation: List[Dict]) -> str:
-    """Generate a mock summary for testing purposes."""
-    if not conversation:
-        return "No conversation to summarize."
-    
-    participants = set(item['speaker'] for item in conversation)
-    message_count = len(conversation)
-    
-    return f"""Summary of conversation between {', '.join(participants)}:
+def generate_summary_and_mapping(conversation: List[Dict], summary_generator: SummaryGenerator) -> Tuple[str, Dict, List[str]]:
+    """Generate summary and create sentence-to-source mapping."""
+    summary = summary_generator.generate_summary_with_api(conversation)
+    sentence_mapping, sentences = summary_generator.map_sentences_to_sources(summary, conversation)
+    return summary, sentence_mapping, sentences
 
-The conversation consists of {message_count} messages. The discussion appears to involve health-related concerns and weather information. Key topics include illness, weather conditions, and helpful suggestions for care.
-
-This is a placeholder summary that will be replaced with AI-generated content in Phase 2."""
+def display_interactive_summary(summary_sentences: List[str], sentence_mapping: Dict, conversation: List[Dict], session_data: Dict):
+    """Display an interactive summary with clickable sentences."""
+    st.markdown("### 📝 Interactive Summary")
+    st.markdown("*Click on any sentence to view the source dialogue segments*")
+    
+    # Display each sentence as a clickable button
+    for i, sentence in enumerate(summary_sentences):
+        sentence_id = f"sent_{i}"
+        
+        # Create a button for each sentence
+        if st.button(
+            sentence.strip(),
+            key=f"summary_sent_{i}",
+            help="Click to view source dialogue",
+            use_container_width=True
+        ):
+            session_data['selected_sentence'] = sentence_id
+            
+            # Log the sentence interaction
+            storage = DataStorage()
+            storage.log_interaction({
+                'action': 'summary_sentence_clicked',
+                'sentence_id': sentence_id,
+                'sentence_number': i + 1,
+                'sentence_text': sentence.strip()[:100],  # Log first 100 chars
+                'mapped_message_indices': sentence_mapping.get(sentence_id, [])
+            })
+        
+        # Add some spacing
+        st.write("")
+    
+    # Display source context if a sentence is selected
+    if session_data.get('selected_sentence'):
+        selected_id = session_data['selected_sentence']
+        if selected_id in sentence_mapping:
+            st.markdown("---")
+            st.markdown("### 🔍 Source Dialogue Context")
+            
+            relevant_indices = sentence_mapping[selected_id]
+            sentence_num = int(selected_id.split('_')[1]) + 1
+            
+            st.info(f"📌 Showing source context for Summary Sentence {sentence_num}")
+            
+            # Display relevant conversation messages
+            for idx in relevant_indices:
+                if 0 <= idx < len(conversation):
+                    msg = conversation[idx]
+                    # Highlight the relevant message with proper contrast
+                    st.markdown(f"""
+                    <div style="background-color: #e8f4fd; color: #1e1e1e; padding: 15px; margin: 8px 0; border-radius: 8px; border-left: 5px solid #0066cc; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <strong style="color: #0066cc;">[{msg['timestamp']}] {msg['speaker']}:</strong><br>
+                        <span style="color: #2c3e50; line-height: 1.5;">{msg['message']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # Add button to clear selection
+            if st.button("🔄 Clear Selection", key="clear_selection"):
+                session_data['selected_sentence'] = None
+                st.rerun()
 
 def generate_mock_follow_ups() -> List[str]:
     """Generate mock follow-ups for testing purposes."""
@@ -96,9 +241,10 @@ def generate_mock_follow_ups() -> List[str]:
 def main():
     """Main Streamlit application."""
     
-    # Initialize data storage
+    # Initialize data storage and summary generator
     storage = DataStorage()
     session_data = storage.get_session_data()
+    summary_generator = SummaryGenerator()
     
     # Header
     st.title("🤖 Agentic Follow-up Rating System")
@@ -106,6 +252,25 @@ def main():
     
     # Sidebar for file upload and controls
     with st.sidebar:
+        st.header("🔧 Configuration")
+        
+        # API Key input
+        api_key = st.text_input(
+            "OpenAI API Key (optional)",
+            type="password",
+            help="Enter your OpenAI API key for AI-powered summaries. If not provided, a fallback summary will be generated.",
+            placeholder="sk-..."
+        )
+        
+        if api_key:
+            st.session_state.openai_api_key = api_key
+            st.success("✅ API key configured")
+        elif hasattr(st.session_state, 'openai_api_key'):
+            st.info("🔑 Using previously entered API key")
+        else:
+            st.warning("⚠️ No API key provided - using fallback summary generation")
+        
+        st.divider()
         st.header("📁 Upload Conversation")
         
         uploaded_file = st.file_uploader(
@@ -134,10 +299,26 @@ def main():
                     
                 # Generate summary and follow-ups
                 if st.button("🔄 Process Conversation"):
-                    with st.spinner("Processing conversation..."):
-                        session_data['summary'] = generate_mock_summary(conversation)
+                    with st.spinner("Generating AI-powered summary..."):
+                        # Generate summary with sentence mapping
+                        summary, sentence_mapping, sentences = generate_summary_and_mapping(
+                            conversation, summary_generator
+                        )
+                        
+                        session_data['summary'] = summary
+                        session_data['summary_sentences'] = sentences
+                        session_data['sentence_mapping'] = sentence_mapping
                         session_data['follow_ups'] = generate_mock_follow_ups()
-                        st.success("✅ Conversation processed!")
+                        
+                        # Log summary generation
+                        storage.log_interaction({
+                            'action': 'summary_generated',
+                            'conversation_length': len(conversation),
+                            'summary_sentences': len(sentences),
+                            'has_api_key': bool(hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key)
+                        })
+                        
+                        st.success("✅ Conversation processed with AI summary!")
                         st.rerun()
             else:
                 st.error("❌ No valid conversation messages found in the file")
@@ -148,6 +329,7 @@ def main():
             st.subheader("📊 Session Info")
             st.write(f"Messages: {len(session_data['conversation'])}")
             st.write(f"Summary generated: {'✅' if session_data['summary'] else '❌'}")
+            st.write(f"Summary sentences: {len(session_data.get('summary_sentences', []))}")
             st.write(f"Follow-ups generated: {'✅' if session_data['follow_ups'] else '❌'}")
     
     # Main content area
@@ -220,18 +402,28 @@ def main():
         with col2:
             st.header("📝 Conversation Summary")
             
-            if session_data['summary']:
-                st.markdown(session_data['summary'])
-                
-                st.subheader("🔍 Summary Analysis")
-                st.info("💡 **Coming in Phase 2**: Click on summary sentences to view source dialogue segments")
+            if session_data['summary'] and session_data.get('summary_sentences'):
+                # Display interactive summary
+                display_interactive_summary(
+                    session_data['summary_sentences'],
+                    session_data['sentence_mapping'],
+                    session_data['conversation'],
+                    session_data
+                )
                 
                 # Show selected follow-up
                 if session_data.get('selected_follow_up') is not None:
+                    st.markdown("---")
                     st.subheader("✅ Selected Follow-up")
                     selected_idx = session_data['selected_follow_up']
                     selected_text = session_data['user_feedback'][f'follow_up_{selected_idx}']['edited_text']
                     st.success(f"**Follow-up {selected_idx + 1}**: {selected_text}")
+            
+            elif session_data['summary']:
+                # Fallback to regular summary display if sentences aren't available
+                st.markdown("### 📝 Summary")
+                st.markdown(session_data['summary'])
+                st.info("💡 Process the conversation again to enable interactive summary features")
             
             # Show original conversation
             with st.expander("📖 View Original Conversation"):
