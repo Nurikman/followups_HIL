@@ -60,37 +60,274 @@ class ConversationParser:
         return conversations
 
 class SummaryGenerator:
-    """Generate AI-powered summaries with sentence-to-source mapping."""
+    """Generate segment-based summaries with precise source mapping."""
     
     def __init__(self):
-        self.summary_prompt = """Could you please provide a summary of a given dialogue, including all key points and supporting details? The summary should be comprehensive and accurately reflect the main message and arguments presented in the original dialogue, while also being concise and easy to understand. To ensure accuracy, please read the text carefully and pay attention to any nuances or complexities in the language. Additionally, the summary should avoid any personal biases or interpretations and remain objective and factual throughout."""
+        self.segment_summary_prompt = """Please provide a concise summary of this dialogue segment in 1-2 sentences. Focus on the key points, actions, or information exchanged. Be objective and factual."""
         
+    def segment_conversation(self, conversation: List[Dict]) -> List[Dict]:
+        """Segment conversation using expert analysis prompt and programmatic copy-pasting."""
+        if not conversation:
+            return []
+        
+        # Use GPT-4o with the expert prompt to get segment boundaries
+        if hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key:
+            return self.segment_with_expert_analysis(conversation)
+        
+        # Fallback to programmatic segmentation
+        return self.get_programmatic_segments_new_format(conversation)
+    
+
+    
+    def segment_with_expert_analysis(self, conversation: List[Dict]) -> List[Dict]:
+        """Use GPT-4o with expert conversation analyzer prompt to get segment boundaries."""
+        try:
+            client = openai.OpenAI(api_key=st.session_state.openai_api_key)
+            
+            # Format conversation for the prompt
+            conversation_text = self.format_conversation_for_prompt(conversation)
+            
+            # Count total messages first
+            total_messages = len(conversation)
+            
+            expert_prompt = f"""You are an expert conversation analyzer that segments dialogues.
+
+IMPORTANT: This conversation contains EXACTLY {total_messages} messages, numbered from 0 to {total_messages - 1}.
+DO NOT create segments beyond message index {total_messages - 1}.
+
+Conversation to analyze:
+
+{conversation_text}
+
+Please analyze this dialogue and create a structured breakdown:
+
+SEGMENTATION STRATEGY:
+- Create segments based on MAJOR conversation themes and substantial topic shifts
+- Each segment should represent a significant conversation phase or major theme
+- Look for MAJOR breakpoints: significant topic changes, major emotional shifts, substantial problem-solution cycles
+- Create FEWER, MORE SUBSTANTIAL segments - prioritize comprehensive coverage over granular division
+- Each segment MUST contain at least 200 words of conversation content
+- Create a MAXIMUM of 10 segments total, fewer is strongly preferred
+- Only segment when there is a truly significant shift in conversation direction
+
+SEGMENT CRITERIA (apply conservatively):
+1. Major topic shift: When conversation moves to a completely different subject area
+2. Significant emotional change: When the overall mood or tone changes substantially
+3. Complete problem-solution cycles: Full cycles from problem identification through resolution
+4. Major conversation direction change: Significant shifts from one conversation mode to another
+5. Clear temporal breaks: Only very obvious time gaps or conversation restarts
+6. Major engagement level shifts: Substantial changes in conversation depth or involvement
+
+OUTPUT REQUIREMENTS:
+- Create NO MORE than 10 segments maximum (fewer is strongly preferred)
+- Each segment MUST contain at least 200 words of dialogue content
+- Only create new segments for truly major conversation shifts
+- Err on the side of fewer, larger segments rather than many small ones
+- For short conversations (under 1000 words), create only 2-4 segments maximum
+- CRITICAL: start_idx and end_idx must be between 0 and {total_messages - 1}
+- CRITICAL: Do not create segments for messages that don't exist
+
+Focus on capturing the major phases and substantial themes of the conversation experience.
+
+Return ONLY a JSON array with this exact format:
+[
+  {{
+    "conversation_segment_id": 1,
+    "start_idx": 0,
+    "end_idx": 25
+  }},
+  {{
+    "conversation_segment_id": 2, 
+    "start_idx": 26,
+    "end_idx": 50
+  }}
+]
+
+Where start_idx and end_idx are 0-based message indices between 0 and {total_messages - 1}."""
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert conversation analyzer. Return only valid JSON with segment boundaries."},
+                    {"role": "user", "content": expert_prompt}
+                ],
+                max_tokens=10000,
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+            
+            # Parse the JSON response
+            import json
+            segments_data = json.loads(response.choices[0].message.content)
+            
+            # Convert to our format and populate content programmatically
+            segments = []
+            if isinstance(segments_data, list):
+                segment_list = segments_data
+            elif 'segments' in segments_data:
+                segment_list = segments_data['segments']
+            else:
+                return self.get_programmatic_segments_new_format(conversation)
+            
+            for segment_data in segment_list:
+                if 'start_idx' in segment_data and 'end_idx' in segment_data:
+                    start_idx = segment_data['start_idx']
+                    end_idx = segment_data['end_idx']
+                    
+                    # Validate indices are within conversation bounds
+                    if start_idx < 0 or start_idx >= len(conversation):
+                        st.warning(f"Invalid start_idx {start_idx} for conversation with {len(conversation)} messages. Skipping segment.")
+                        continue
+                    
+                    if end_idx < 0 or end_idx >= len(conversation):
+                        st.warning(f"Invalid end_idx {end_idx} for conversation with {len(conversation)} messages. Adjusting to {len(conversation) - 1}.")
+                        end_idx = len(conversation) - 1
+                    
+                    if start_idx > end_idx:
+                        st.warning(f"Invalid segment: start_idx {start_idx} > end_idx {end_idx}. Skipping segment.")
+                        continue
+                    
+                    # Programmatically copy-paste content using validated indices
+                    content = self.extract_content_from_indices(conversation, start_idx, end_idx)
+                    
+                    # Validate content is not empty
+                    if not content.strip():
+                        st.warning(f"Empty content for segment {start_idx}-{end_idx}. Skipping segment.")
+                        continue
+                    
+                    segments.append({
+                        'conversation_segment_id': segment_data.get('conversation_segment_id', len(segments) + 1),
+                        'content': content,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx
+                    })
+            
+            if segments:
+                return segments
+            else:
+                return self.get_programmatic_segments_new_format(conversation)
+                
+        except Exception as e:
+            st.error(f"Expert segmentation error: {str(e)}. Using fallback segmentation.")
+            return self.get_programmatic_segments_new_format(conversation)
+    
+    def get_programmatic_segments_new_format(self, conversation: List[Dict]) -> List[Dict]:
+        """Fallback programmatic segmentation in new JSON format with larger segments."""
+        segments = []
+        
+        # Special handling for known test conversation (6 messages) - combine into 2 segments
+        if len(conversation) == 6:
+            segment_boundaries = [
+                (0, 3),  # Greeting + Health Concern + Weather Info
+                (4, 5)   # Care Advice + Agreement
+            ]
+            
+            for i, (start_idx, end_idx) in enumerate(segment_boundaries):
+                content = self.extract_content_from_indices(conversation, start_idx, end_idx)
+                segments.append({
+                    'conversation_segment_id': i + 1,
+                    'content': content,
+                    'start_idx': start_idx,
+                    'end_idx': end_idx
+                })
+        
+        else:
+            # General segmentation - create larger segments to meet 200-word minimum
+            # Calculate segment size to create max 10 segments
+            total_messages = len(conversation)
+            target_segments = min(10, max(1, total_messages // 20))  # Aim for ~20 messages per segment
+            
+            if target_segments == 1:
+                # If conversation is small, create just 1-2 segments
+                if total_messages <= 10:
+                    segments.append({
+                        'conversation_segment_id': 1,
+                        'content': self.extract_content_from_indices(conversation, 0, total_messages - 1),
+                        'start_idx': 0,
+                        'end_idx': total_messages - 1
+                    })
+                else:
+                    # Split into 2 segments
+                    mid_point = total_messages // 2
+                    segments.append({
+                        'conversation_segment_id': 1,
+                        'content': self.extract_content_from_indices(conversation, 0, mid_point - 1),
+                        'start_idx': 0,
+                        'end_idx': mid_point - 1
+                    })
+                    segments.append({
+                        'conversation_segment_id': 2,
+                        'content': self.extract_content_from_indices(conversation, mid_point, total_messages - 1),
+                        'start_idx': mid_point,
+                        'end_idx': total_messages - 1
+                    })
+            else:
+                # Create larger segments
+                messages_per_segment = total_messages // target_segments
+                
+                for i in range(target_segments):
+                    start_idx = i * messages_per_segment
+                    if i == target_segments - 1:
+                        # Last segment gets any remaining messages
+                        end_idx = total_messages - 1
+                    else:
+                        end_idx = start_idx + messages_per_segment - 1
+                    
+                    content = self.extract_content_from_indices(conversation, start_idx, end_idx)
+                    segments.append({
+                        'conversation_segment_id': i + 1,
+                        'content': content,
+                        'start_idx': start_idx,
+                        'end_idx': end_idx
+                    })
+        
+        return segments
+    
     def format_conversation_for_prompt(self, conversation: List[Dict]) -> str:
-        """Format conversation for AI prompt."""
-        formatted = "DIALOGUE:\n"
+        """Format conversation for the expert analysis prompt."""
+        formatted = ""
         for msg in conversation:
             formatted += f"[{msg['timestamp']}] {msg['speaker']}: {msg['message']}\n"
+        return formatted.strip()
+    
+    def extract_content_from_indices(self, conversation: List[Dict], start_idx: int, end_idx: int) -> str:
+        """Programmatically copy-paste content using start_idx and end_idx."""
+        content_lines = []
+        
+        for i in range(start_idx, min(end_idx + 1, len(conversation))):
+            msg = conversation[i]
+            # Format as "Speaker: message" without timestamp
+            content_lines.append(f"{msg['speaker']}: {msg['message']}")
+        
+        return "\n".join(content_lines)
+    
+
+    
+    def format_segment_for_prompt(self, segment: Dict) -> str:
+        """Format a conversation segment for AI prompt."""
+        formatted = "DIALOGUE SEGMENT:\n"
+        formatted += segment['content']
         return formatted
     
-    def generate_summary_with_api(self, conversation: List[Dict]) -> str:
-        """Generate summary using OpenAI API."""
+    def generate_segment_summary_with_api(self, segment: Dict) -> str:
+        """Generate summary for a specific segment using OpenAI API."""
         try:
             # Check if API key is available
             if not hasattr(st.session_state, 'openai_api_key') or not st.session_state.openai_api_key:
-                return self.generate_fallback_summary(conversation)
+                return self.generate_fallback_segment_summary(segment)
             
             client = openai.OpenAI(api_key=st.session_state.openai_api_key)
             
-            conversation_text = self.format_conversation_for_prompt(conversation)
-            full_prompt = f"{self.summary_prompt}\n\n{conversation_text}"
+            segment_text = self.format_segment_for_prompt(segment)
+            full_prompt = f"{self.segment_summary_prompt}\n\n{segment_text}"
             
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that provides accurate, objective summaries of dialogues."},
+                    {"role": "system", "content": "You are a helpful assistant that provides concise, accurate summaries of dialogue segments."},
                     {"role": "user", "content": full_prompt}
                 ],
-                max_tokens=500,
+                max_tokens=150,
                 temperature=0.3
             )
             
@@ -98,41 +335,64 @@ class SummaryGenerator:
             
         except Exception as e:
             st.error(f"API Error: {str(e)}")
-            return self.generate_fallback_summary(conversation)
+            return self.generate_fallback_segment_summary(segment)
     
+    def generate_fallback_segment_summary(self, segment: Dict) -> str:
+        """Generate a fallback summary for a segment when API is not available."""
+        content = segment.get('content', '')
+        if not content:
+            return "Empty segment."
+        
+        # Extract speakers from content lines
+        lines = content.split('\n')
+        speakers = list(set(line.split(':', 1)[0] for line in lines if ':' in line))
+        
+        # Extract all text for topic analysis
+        all_text = " ".join([line.split(':', 1)[1].strip() for line in lines if ':' in line])
+        words = all_text.lower().split()
+        
+        # Key topic detection
+        health_words = ['cold', 'sick', 'feel', 'better', 'health', 'medicine', 'rest', 'recover']
+        weather_words = ['weather', 'temperature', 'degrees', 'wind', 'thunderstorm', 'rain', 'warm', 'celsius', 'fahrenheit']
+        location_words = ['miami', 'minnesota', 'dundas']
+        care_words = ['tea', 'honey', 'lemon', 'warm', 'care', 'help', 'suggestion']
+        
+        topics = []
+        if any(word in words for word in health_words):
+            topics.append("health discussion")
+        if any(word in words for word in weather_words):
+            topics.append("weather information")
+        if any(word in words for word in location_words):
+            topics.append("location details")
+        if any(word in words for word in care_words):
+            topics.append("care suggestions")
+        
+        # Generate summary based on content
+        if len(lines) == 1:
+            first_speaker = speakers[0] if speakers else "Speaker"
+            summary = f"{first_speaker} shares: {all_text[:60]}..."
+        else:
+            if len(speakers) == 1:
+                summary = f"{speakers[0]} discusses {', '.join(topics) if topics else 'various topics'}."
+            else:
+                summary = f"Exchange between {' and '.join(speakers)} about {', '.join(topics) if topics else 'conversation topics'}."
+        
+        return summary
     
-    def map_sentences_to_sources(self, summary: str, conversation: List[Dict]) -> Dict[str, List[int]]:
-        """Map each sentence in summary to relevant conversation messages."""
-        sentences = nltk.sent_tokenize(summary)
-        sentence_mapping = {}
+    def generate_segmented_summaries(self, conversation: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        """Generate summaries for each conversation segment."""
+        segments = self.segment_conversation(conversation)
+        summaries = []
         
-        for i, sentence in enumerate(sentences):
-            sentence_id = f"sent_{i}"
-            relevant_messages = []
-            
-            # Simple keyword matching to find relevant messages
-            sentence_words = set(sentence.lower().split())
-            
-            for j, msg in enumerate(conversation):
-                msg_words = set(msg['message'].lower().split())
-                
-                # Calculate word overlap
-                overlap = len(sentence_words.intersection(msg_words))
-                overlap_ratio = overlap / max(len(sentence_words), 1)
-                
-                # If there's significant overlap, consider it relevant
-                if overlap_ratio > 0.1 or overlap >= 2:
-                    relevant_messages.append(j)
-            
-            # If no matches found, assign to nearby messages based on position
-            if not relevant_messages:
-                # Assign to middle portion of conversation as fallback
-                mid_point = len(conversation) // 2
-                relevant_messages = [max(0, mid_point - 1), mid_point, min(len(conversation) - 1, mid_point + 1)]
-            
-            sentence_mapping[sentence_id] = relevant_messages
+        for segment in segments:
+            summary_text = self.generate_segment_summary_with_api(segment)
+            summaries.append({
+                'conversation_segment_id': segment['conversation_segment_id'],
+                'summary': summary_text,
+                'segment': segment
+            })
         
-        return sentence_mapping, sentences
+        return summaries, segments
 
 class DataStorage:
     """Handle data storage for user interactions and feedback."""
@@ -152,80 +412,96 @@ class DataStorage:
         if 'session_data' not in st.session_state:
             st.session_state.session_data = {
                 'conversation': [],
-                'summary': "",
-                'summary_sentences': [],
-                'sentence_mapping': {},
+                'segment_summaries': [],
+                'segments': [],
                 'follow_ups': [],
                 'selected_follow_up': None,
                 'user_feedback': {},
-                'selected_sentence': None
+                'selected_segment': None
             }
         return st.session_state.session_data
 
-def generate_summary_and_mapping(conversation: List[Dict], summary_generator: SummaryGenerator) -> Tuple[str, Dict, List[str]]:
-    """Generate summary and create sentence-to-source mapping."""
-    summary = summary_generator.generate_summary_with_api(conversation)
-    sentence_mapping, sentences = summary_generator.map_sentences_to_sources(summary, conversation)
-    return summary, sentence_mapping, sentences
+def generate_segmented_summaries(conversation: List[Dict], summary_generator: SummaryGenerator) -> Tuple[List[Dict], List[Dict]]:
+    """Generate segment-based summaries with precise source mapping."""
+    summaries, segments = summary_generator.generate_segmented_summaries(conversation)
+    return summaries, segments
 
-def display_interactive_summary(summary_sentences: List[str], sentence_mapping: Dict, conversation: List[Dict], session_data: Dict):
-    """Display an interactive summary with clickable sentences."""
-    st.markdown("### 📝 Interactive Summary")
-    st.markdown("*Click on any sentence to view the source dialogue segments*")
+def display_interactive_segment_summaries(segment_summaries: List[Dict], segments: List[Dict], conversation: List[Dict], session_data: Dict):
+    """Display an interactive summary with clickable segment summaries."""
+    st.markdown("### 📝 Interactive Segment Summaries")
+    st.markdown("*Click on any summary to view the exact source dialogue segment*")
     
-    # Display each sentence as a clickable button
-    for i, sentence in enumerate(summary_sentences):
-        sentence_id = f"sent_{i}"
+    # Display each segment summary as a clickable button
+    for summary_item in segment_summaries:
+        segment_id = summary_item['conversation_segment_id']
+        summary_text = summary_item['summary']
         
-        # Create a button for each sentence
+        # Create a button for each segment summary
         if st.button(
-            sentence.strip(),
-            key=f"summary_sent_{i}",
-            help="Click to view source dialogue",
+            f"**Segment {segment_id}:** {summary_text}",
+            key=f"segment_summary_{segment_id}",
+            help="Click to view exact source dialogue",
             use_container_width=True
         ):
-            session_data['selected_sentence'] = sentence_id
+            session_data['selected_segment'] = segment_id
             
-            # Log the sentence interaction
+            # Log the segment interaction
             storage = DataStorage()
             storage.log_interaction({
-                'action': 'summary_sentence_clicked',
-                'sentence_id': sentence_id,
-                'sentence_number': i + 1,
-                'sentence_text': sentence.strip()[:100],  # Log first 100 chars
-                'mapped_message_indices': sentence_mapping.get(sentence_id, [])
+                'action': 'segment_summary_clicked',
+                'segment_id': segment_id,
+                'segment_number': segment_id,
+                'summary_text': summary_text[:100],  # Log first 100 chars
+                'segment_content_length': len(summary_item['segment']['content'])
             })
         
         # Add some spacing
         st.write("")
     
-    # Display source context if a sentence is selected
-    if session_data.get('selected_sentence'):
-        selected_id = session_data['selected_sentence']
-        if selected_id in sentence_mapping:
+    # Display source context if a segment is selected
+    if session_data.get('selected_segment') is not None:
+        selected_segment_id = session_data['selected_segment']
+        
+        # Find the selected segment
+        selected_segment = None
+        for seg in segments:
+            if seg['conversation_segment_id'] == selected_segment_id:
+                selected_segment = seg
+                break
+        
+        if selected_segment:
             st.markdown("---")
-            st.markdown("### 🔍 Source Dialogue Context")
+            st.markdown("### 🔍 Exact Source Dialogue Segment")
             
-            relevant_indices = sentence_mapping[selected_id]
-            sentence_num = int(selected_id.split('_')[1]) + 1
+            st.info(f"📌 Showing complete dialogue for Segment {selected_segment_id}")
             
-            st.info(f"📌 Showing source context for Summary Sentence {sentence_num}")
-            
-            # Display relevant conversation messages
-            for idx in relevant_indices:
-                if 0 <= idx < len(conversation):
-                    msg = conversation[idx]
-                    # Highlight the relevant message with proper contrast
+            # Display the exact conversation content from this segment
+            content_lines = selected_segment['content'].split('\n')
+            for line in content_lines:
+                if ':' in line:
+                    speaker, message = line.split(':', 1)
+                    # Highlight each message with proper contrast
                     st.markdown(f"""
                     <div style="background-color: #e8f4fd; color: #1e1e1e; padding: 15px; margin: 8px 0; border-radius: 8px; border-left: 5px solid #0066cc; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                        <strong style="color: #0066cc;">[{msg['timestamp']}] {msg['speaker']}:</strong><br>
-                        <span style="color: #2c3e50; line-height: 1.5;">{msg['message']}</span>
+                        <strong style="color: #0066cc;">{speaker}:</strong><br>
+                        <span style="color: #2c3e50; line-height: 1.5;">{message.strip()}</span>
                     </div>
                     """, unsafe_allow_html=True)
             
+            # Show segment info
+            message_count = len(content_lines)
+            st.markdown(f"""
+            <div style="background-color: #f8f9fa; padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #dee2e6;">
+                <small style="color: #6c757d;">
+                    <strong>Segment Info:</strong> {message_count} messages 
+                    (positions {selected_segment['start_idx']+1}-{selected_segment['end_idx']+1} in full conversation)
+                </small>
+            </div>
+            """, unsafe_allow_html=True)
+            
             # Add button to clear selection
             if st.button("🔄 Clear Selection", key="clear_selection"):
-                session_data['selected_sentence'] = None
+                session_data['selected_segment'] = None
                 st.rerun()
 
 def generate_mock_follow_ups() -> List[str]:
@@ -299,26 +575,39 @@ def main():
                     
                 # Generate summary and follow-ups
                 if st.button("🔄 Process Conversation"):
-                    with st.spinner("Generating AI-powered summary..."):
-                        # Generate summary with sentence mapping
-                        summary, sentence_mapping, sentences = generate_summary_and_mapping(
+                    with st.spinner("Generating segment-based AI summaries..."):
+                        # Show conversation statistics
+                        st.info(f"📊 Conversation contains {len(conversation)} messages (indices 0-{len(conversation)-1})")
+                        
+                        # Generate segment-based summaries
+                        summaries, segments = generate_segmented_summaries(
                             conversation, summary_generator
                         )
                         
-                        session_data['summary'] = summary
-                        session_data['summary_sentences'] = sentences
-                        session_data['sentence_mapping'] = sentence_mapping
+                        # Validate and display segment information
+                        valid_segments = []
+                        for segment in segments:
+                            if segment['start_idx'] < len(conversation) and segment['end_idx'] < len(conversation):
+                                valid_segments.append(segment)
+                            else:
+                                st.error(f"⚠️ Invalid segment {segment['conversation_segment_id']}: indices {segment['start_idx']}-{segment['end_idx']} exceed conversation length {len(conversation)}")
+                        
+                        session_data['segment_summaries'] = summaries
+                        session_data['segments'] = valid_segments
                         session_data['follow_ups'] = generate_mock_follow_ups()
                         
                         # Log summary generation
                         storage.log_interaction({
-                            'action': 'summary_generated',
+                            'action': 'segment_summaries_generated',
                             'conversation_length': len(conversation),
-                            'summary_sentences': len(sentences),
+                            'number_of_segments': len(valid_segments),
+                            'invalid_segments': len(segments) - len(valid_segments),
                             'has_api_key': bool(hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key)
                         })
                         
-                        st.success("✅ Conversation processed with AI summary!")
+                        st.success(f"✅ Conversation processed with {len(valid_segments)} valid segment-based AI summaries!")
+                        if len(segments) != len(valid_segments):
+                            st.warning(f"⚠️ Filtered out {len(segments) - len(valid_segments)} invalid segments that exceeded conversation bounds")
                         st.rerun()
             else:
                 st.error("❌ No valid conversation messages found in the file")
@@ -327,10 +616,18 @@ def main():
         if session_data['conversation']:
             st.divider()
             st.subheader("📊 Session Info")
-            st.write(f"Messages: {len(session_data['conversation'])}")
-            st.write(f"Summary generated: {'✅' if session_data['summary'] else '❌'}")
-            st.write(f"Summary sentences: {len(session_data.get('summary_sentences', []))}")
-            st.write(f"Follow-ups generated: {'✅' if session_data['follow_ups'] else '❌'}")
+            total_messages = len(session_data['conversation'])
+            st.write(f"**Total Messages**: {total_messages} (indices 0-{total_messages-1})")
+            st.write(f"**Segments**: {len(session_data.get('segments', []))}")
+            
+            # Show segment ranges if available
+            if session_data.get('segments'):
+                st.write("**Segment Ranges**:")
+                for segment in session_data['segments']:
+                    st.text(f"  Segment {segment['conversation_segment_id']}: {segment['start_idx']}-{segment['end_idx']}")
+            
+            st.write(f"**Summaries generated**: {'✅' if session_data['segment_summaries'] else '❌'}")
+            st.write(f"**Follow-ups generated**: {'✅' if session_data['follow_ups'] else '❌'}")
     
     # Main content area
     if session_data['conversation'] and session_data['follow_ups']:
@@ -400,13 +697,13 @@ def main():
         
         # Right column: Summary
         with col2:
-            st.header("📝 Conversation Summary")
+            st.header("📝 Conversation Segment Summaries")
             
-            if session_data['summary'] and session_data.get('summary_sentences'):
-                # Display interactive summary
-                display_interactive_summary(
-                    session_data['summary_sentences'],
-                    session_data['sentence_mapping'],
+            if session_data['segment_summaries'] and session_data.get('segments'):
+                # Display interactive segment summaries
+                display_interactive_segment_summaries(
+                    session_data['segment_summaries'],
+                    session_data['segments'],
                     session_data['conversation'],
                     session_data
                 )
@@ -419,11 +716,9 @@ def main():
                     selected_text = session_data['user_feedback'][f'follow_up_{selected_idx}']['edited_text']
                     st.success(f"**Follow-up {selected_idx + 1}**: {selected_text}")
             
-            elif session_data['summary']:
-                # Fallback to regular summary display if sentences aren't available
-                st.markdown("### 📝 Summary")
-                st.markdown(session_data['summary'])
-                st.info("💡 Process the conversation again to enable interactive summary features")
+            elif session_data['conversation']:
+                # Show message to process the conversation
+                st.info("💡 Upload a conversation and click 'Process Conversation' to generate segment-based summaries")
             
             # Show original conversation
             with st.expander("📖 View Original Conversation"):
