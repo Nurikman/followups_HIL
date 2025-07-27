@@ -14,7 +14,8 @@ try:
     from agents.chat_segmenter_rater import (
         make_agent_chat_segmenter_rater,
         SegmenterRaterDeps,
-        ConversationSegment
+        ConversationSegment,
+        populate_segment_content
     )
     from agents.conversation_starter_generator import (
         make_agent_conversation_starter_generator,
@@ -81,7 +82,9 @@ class SummaryGenerator:
     """Generate segment-based summaries with precise source mapping."""
     
     def __init__(self):
-        self.segment_summary_prompt = """Please provide a concise summary of this dialogue segment in 1-2 sentences. Focus on the key points, actions, or information exchanged. Be objective and factual."""
+        self.segment_summary_prompt = """Please provide a concise summary of this dialogue segment in 1-2 sentences. Focus on the key points, actions, or information exchanged. Be objective and factual. 
+
+LANGUAGE DETECTION: If the dialogue segment is primarily in Russian, provide your summary in Russian. If it's in English or other languages, respond in English."""
         
     def segment_conversation(self, conversation: List[Dict]) -> List[Dict]:
         """Segment conversation using expert analysis prompt and programmatic copy-pasting."""
@@ -369,31 +372,62 @@ Where start_idx and end_idx are 0-based message indices between 0 and {total_mes
         all_text = " ".join([line.split(':', 1)[1].strip() for line in lines if ':' in line])
         words = all_text.lower().split()
         
-        # Key topic detection
-        health_words = ['cold', 'sick', 'feel', 'better', 'health', 'medicine', 'rest', 'recover']
-        weather_words = ['weather', 'temperature', 'degrees', 'wind', 'thunderstorm', 'rain', 'warm', 'celsius', 'fahrenheit']
-        location_words = ['miami', 'minnesota', 'dundas']
-        care_words = ['tea', 'honey', 'lemon', 'warm', 'care', 'help', 'suggestion']
+        # Detect if content is in Russian
+        russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
+        is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
         
-        topics = []
-        if any(word in words for word in health_words):
-            topics.append("health discussion")
-        if any(word in words for word in weather_words):
-            topics.append("weather information")
-        if any(word in words for word in location_words):
-            topics.append("location details")
-        if any(word in words for word in care_words):
-            topics.append("care suggestions")
-        
-        # Generate summary based on content
-        if len(lines) == 1:
-            first_speaker = speakers[0] if speakers else "Speaker"
-            summary = f"{first_speaker} shares: {all_text[:60]}..."
-        else:
-            if len(speakers) == 1:
-                summary = f"{speakers[0]} discusses {', '.join(topics) if topics else 'various topics'}."
+        if is_russian:
+            # Russian topic detection
+            health_words = ['простуда', 'болен', 'болеет', 'здоровье', 'лекарство', 'отдых', 'выздоровление', 'чувствую', 'лучше']
+            weather_words = ['погода', 'температура', 'градусы', 'ветер', 'дождь', 'снег', 'тепло', 'холодно', 'солнце']
+            location_words = ['москва', 'петербург', 'россия', 'город', 'дом', 'работа']
+            care_words = ['чай', 'мёд', 'лимон', 'забота', 'помощь', 'совет']
+            
+            topics = []
+            if any(word in all_text.lower() for word in health_words):
+                topics.append("обсуждение здоровья")
+            if any(word in all_text.lower() for word in weather_words):
+                topics.append("информация о погоде")
+            if any(word in all_text.lower() for word in location_words):
+                topics.append("детали местоположения")
+            if any(word in all_text.lower() for word in care_words):
+                topics.append("советы по уходу")
+            
+            # Generate Russian summary
+            if len(lines) == 1:
+                first_speaker = speakers[0] if speakers else "Собеседник"
+                summary = f"{first_speaker} делится: {all_text[:60]}..."
             else:
-                summary = f"Exchange between {' and '.join(speakers)} about {', '.join(topics) if topics else 'conversation topics'}."
+                if len(speakers) == 1:
+                    summary = f"{speakers[0]} обсуждает {', '.join(topics) if topics else 'различные темы'}."
+                else:
+                    summary = f"Обмен между {' и '.join(speakers)} о {', '.join(topics) if topics else 'темах разговора'}."
+        else:
+            # English topic detection
+            health_words = ['cold', 'sick', 'feel', 'better', 'health', 'medicine', 'rest', 'recover']
+            weather_words = ['weather', 'temperature', 'degrees', 'wind', 'thunderstorm', 'rain', 'warm', 'celsius', 'fahrenheit']
+            location_words = ['miami', 'minnesota', 'dundas']
+            care_words = ['tea', 'honey', 'lemon', 'warm', 'care', 'help', 'suggestion']
+            
+            topics = []
+            if any(word in words for word in health_words):
+                topics.append("health discussion")
+            if any(word in words for word in weather_words):
+                topics.append("weather information")
+            if any(word in words for word in location_words):
+                topics.append("location details")
+            if any(word in words for word in care_words):
+                topics.append("care suggestions")
+            
+            # Generate English summary
+            if len(lines) == 1:
+                first_speaker = speakers[0] if speakers else "Speaker"
+                summary = f"{first_speaker} shares: {all_text[:60]}..."
+            else:
+                if len(speakers) == 1:
+                    summary = f"{speakers[0]} discusses {', '.join(topics) if topics else 'various topics'}."
+                else:
+                    summary = f"Exchange between {' and '.join(speakers)} about {', '.join(topics) if topics else 'conversation topics'}."
         
         return summary
     
@@ -438,10 +472,10 @@ class FollowupGenerator:
         
         return '\n'.join(conversation_lines)
     
-    async def generate_followups_with_agents(self, conversation: List[Dict]) -> List[str]:
+    async def generate_followups_with_agents(self, conversation: List[Dict]) -> Tuple[List[str], List]:
         """Generate followups using the agent-based system."""
         if not AGENTS_AVAILABLE:
-            return self.generate_fallback_followups()
+            return self.generate_fallback_followups(conversation), []
         
         try:
             # Set up environment for agents to access OpenAI API key
@@ -449,7 +483,7 @@ class FollowupGenerator:
                 os.environ['OPENAI_API_KEY'] = st.session_state.openai_api_key
             elif not os.getenv('OPENAI_API_KEY'):
                 st.warning("⚠️ No OpenAI API key available for agents. Using fallback followups.")
-                return self.generate_fallback_followups()
+                return self.generate_fallback_followups(conversation), []
             
             # Format conversation for agents
             formatted_conversation = self.format_conversation_for_agents(conversation)
@@ -458,6 +492,10 @@ class FollowupGenerator:
             deps = SegmenterRaterDeps(conversation=formatted_conversation)
             result = await self.agent_segmenter_rater.run("Please analyze this conversation.", deps=deps)
             segments = result.data.segments
+            
+            # Programmatically populate segment content based on line numbers
+            if AGENTS_AVAILABLE:
+                segments = populate_segment_content(segments, formatted_conversation)
             
             # Get top 3 segments by combined score
             top_segments = sorted(segments, key=lambda x: x.combined_score, reverse=True)[:3]
@@ -470,16 +508,21 @@ class FollowupGenerator:
             # Convert ConversationStarter objects to strings
             followup_strings = [starter.starter for starter in starters[:5]]  # Take top 5
             
-            return followup_strings
+            return followup_strings, segments
             
         except Exception as e:
             st.error(f"Agent-based followup generation failed: {str(e)}")
-            return self.generate_fallback_followups()
+            return self.generate_fallback_followups(conversation), []
     
     def generate_followups_sync(self, conversation: List[Dict]) -> List[str]:
         """Synchronous wrapper for async followup generation."""
+        followups, _ = self.generate_followups_and_segments_sync(conversation)
+        return followups
+    
+    def generate_followups_and_segments_sync(self, conversation: List[Dict]) -> Tuple[List[str], List]:
+        """Synchronous wrapper for async followup generation that returns both followups and segments."""
         if not AGENTS_AVAILABLE:
-            return self.generate_fallback_followups()
+            return self.generate_fallback_followups(conversation), []
             
         try:
             # Try to run in new event loop
@@ -493,26 +536,43 @@ class FollowupGenerator:
                     return asyncio.run(self.generate_followups_with_agents(conversation))
                 except ImportError:
                     st.warning("⚠️ nest_asyncio not available. Using fallback followups.")
-                    return self.generate_fallback_followups()
+                    return self.generate_fallback_followups(conversation), []
                 except Exception as e:
                     st.error(f"Nested async execution failed: {str(e)}")
-                    return self.generate_fallback_followups()
+                    return self.generate_fallback_followups(conversation), []
             else:
                 st.error(f"Async execution failed: {str(e)}")
-                return self.generate_fallback_followups()
+                return self.generate_fallback_followups(conversation), []
         except Exception as e:
             st.error(f"Followup generation failed: {str(e)}")
-            return self.generate_fallback_followups()
+            return self.generate_fallback_followups(conversation), []
     
-    def generate_fallback_followups(self) -> List[str]:
+    def generate_fallback_followups(self, conversation: List[Dict] = None) -> List[str]:
         """Generate fallback follow-ups when agents are not available."""
-        return [
-            "I hope you feel better soon! Is there anything specific you'd like me to help you with while you recover?",
-            "Would you like me to look up some remedies for cold symptoms that might help you feel better?",
-            "Since the weather is quite variable, would you like me to send you daily weather updates while you're feeling unwell?",
-            "Have you been able to rest well? Good sleep is really important when fighting off a cold.",
-            "Would you like me to remind you to take your medication or suggest some warm drinks that might soothe your throat?"
-        ]
+        
+        # Detect if conversation is in Russian
+        is_russian = False
+        if conversation:
+            all_text = " ".join([msg.get('message', '') for msg in conversation])
+            russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
+            is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
+        
+        if is_russian:
+            return [
+                "Надеюсь, ты скоро поправишься! Есть что-то конкретное, с чем я могу помочь тебе во время выздоровления?",
+                "Хочешь, я найду некоторые средства от симптомов простуды, которые могут помочь тебе почувствовать себя лучше?",
+                "Поскольку погода довольно переменчивая, хочешь, чтобы я присылал тебе ежедневные прогнозы погоды, пока ты плохо себя чувствуешь?",
+                "Удается ли тебе хорошо отдыхать? Хороший сон очень важен при борьбе с простудой.",
+                "Хочешь, чтобы я напоминал тебе принимать лекарства или посоветовал теплые напитки, которые могут успокоить горло?"
+            ]
+        else:
+            return [
+                "I hope you feel better soon! Is there anything specific you'd like me to help you with while you recover?",
+                "Would you like me to look up some remedies for cold symptoms that might help you feel better?",
+                "Since the weather is quite variable, would you like me to send you daily weather updates while you're feeling unwell?",
+                "Have you been able to rest well? Good sleep is really important when fighting off a cold.",
+                "Would you like me to remind you to take your medication or suggest some warm drinks that might soothe your throat?"
+            ]
 
 class DataStorage:
     """Handle data storage for user interactions and feedback."""
@@ -535,9 +595,11 @@ class DataStorage:
                 'segment_summaries': [],
                 'segments': [],
                 'follow_ups': [],
+                'agent_segments': [],  # Store conversation segments from agents
                 'selected_follow_up': None,
                 'user_feedback': {},
-                'selected_segment': None
+                'selected_segment': None,
+                'show_agent_analysis': False  # Flag to control display of agent analysis
             }
         return st.session_state.session_data
 
@@ -628,6 +690,173 @@ def generate_intelligent_follow_ups(conversation: List[Dict], followup_generator
     """Generate intelligent follow-ups using the agent-based system."""
     return followup_generator.generate_followups_sync(conversation)
 
+def generate_intelligent_follow_ups_and_segments(conversation: List[Dict], followup_generator: FollowupGenerator) -> Tuple[List[str], List]:
+    """Generate intelligent follow-ups and conversation segments using the agent-based system."""
+    return followup_generator.generate_followups_and_segments_sync(conversation)
+
+def display_agent_conversation_segments(agent_segments: List, session_data: Dict):
+    """Display conversation segments generated by the AI agents with engagement/enjoyment scores and reasoning."""
+    if not agent_segments:
+        st.info("🤖 No agent-generated segments available. This feature requires the agent system to be active.")
+        return
+    
+    st.markdown("### 🧠 AI Agent Analysis")
+    st.markdown("*These segments were generated by the AI agent system for follow-up analysis*")
+    st.markdown("*Each segment is scored on engagement (1-10) and enjoyment (1-10) scales*")
+    
+    # Sort segments by combined score (highest first)
+    sorted_segments = sorted(agent_segments, key=lambda x: x.combined_score, reverse=True)
+    
+    for i, segment in enumerate(sorted_segments):
+        # Create an expandable section for each segment
+        # Create an expandable section for each segment
+        line_info = ""
+        if hasattr(segment, 'start_line') and hasattr(segment, 'end_line'):
+            line_info = f" | Lines {segment.start_line}-{segment.end_line}"
+        
+        with st.expander(f"🎯 Segment {segment.segment_id} (Score: {segment.combined_score}/20){line_info}", expanded=(i == 0)):
+            
+            # Display scores with color coding
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                engagement_color = "🟢" if segment.engagement_score >= 7 else "🟡" if segment.engagement_score >= 4 else "🔴"
+                st.metric("Engagement Score", f"{segment.engagement_score}/10", help="How engaging this segment is (1-10 scale)")
+                st.write(f"{engagement_color} Engagement Level")
+            
+            with col2:
+                enjoyment_color = "🟢" if segment.enjoyment_score >= 7 else "🟡" if segment.enjoyment_score >= 4 else "🔴"
+                st.metric("Enjoyment Score", f"{segment.enjoyment_score}/10", help="How enjoyable this segment is (1-10 scale)")
+                st.write(f"{enjoyment_color} Enjoyment Level")
+            
+            with col3:
+                combined_color = "🟢" if segment.combined_score >= 14 else "🟡" if segment.combined_score >= 8 else "🔴"
+                st.metric("Combined Score", f"{segment.combined_score}/20", help="Overall segment quality score (sum of engagement + enjoyment)")
+                st.write(f"{combined_color} Overall Quality")
+            
+            # Display AI reasoning and segment info
+            st.markdown("**📋 Segment Details:**")
+            
+            # Show topic, tone, and interaction type
+            detail_col1, detail_col2 = st.columns(2)
+            with detail_col1:
+                st.markdown(f"**🎯 Topic:** {segment.topic}")
+                st.markdown(f"**🎭 Tone:** {segment.tone}")
+            with detail_col2:
+                st.markdown(f"**🔄 Direction:** {segment.conversation_direction}")
+                st.markdown(f"**🤝 Type:** {segment.interaction_type}")
+            
+            # Display AI justifications
+            st.markdown("**🧠 AI Analysis:**")
+            
+            if hasattr(segment, 'engagement_justification') and segment.engagement_justification:
+                st.markdown(f"**Engagement Reasoning:** {segment.engagement_justification}")
+            
+            if hasattr(segment, 'enjoyment_justification') and segment.enjoyment_justification:
+                st.markdown(f"**Enjoyment Reasoning:** {segment.enjoyment_justification}")
+            
+            # Display segment boundary info
+            if hasattr(segment, 'start_line') and hasattr(segment, 'end_line'):
+                st.markdown(f"**📍 Segment Boundaries:** Lines {segment.start_line}-{segment.end_line}")
+            
+            # Display segment content
+            st.markdown("**💬 Complete Segment Content:**")
+            
+            if segment.content and segment.content.strip():
+                content_lines = segment.content.split('\n')
+                
+                for i, line in enumerate(content_lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    if ':' in line:
+                        # Try to split on first colon to separate speaker from message
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            speaker, message = parts
+                            speaker = speaker.strip()
+                            message = message.strip()
+                            
+                            # Color code by speaker type
+                            if speaker.lower() == 'agent':
+                                st.markdown(f"""
+                                <div style="background-color: #e3f2fd; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #2196f3;">
+                                    <strong style="color: #1976d2;">🤖 {speaker}:</strong> <span style="color: #424242;">{message}</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"""
+                                <div style="background-color: #f3e5f5; padding: 10px; margin: 5px 0; border-radius: 5px; border-left: 3px solid #9c27b0;">
+                                    <strong style="color: #7b1fa2;">👤 {speaker}:</strong> <span style="color: #424242;">{message}</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        else:
+                            # Fallback for lines that don't follow expected format
+                            st.markdown(f"""
+                            <div style="background-color: #f8f9fa; padding: 8px; margin: 3px 0; border-radius: 3px; border-left: 2px solid #6c757d;">
+                                <span style="color: #495057;">{line}</span>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        # Handle lines without colon (shouldn't happen but good fallback)
+                        st.markdown(f"""
+                        <div style="background-color: #f8f9fa; padding: 8px; margin: 3px 0; border-radius: 3px; border-left: 2px solid #6c757d;">
+                            <span style="color: #495057;">{line}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ No content available for this segment")
+            
+            st.markdown("---")
+    
+    # Summary stats
+    st.markdown("### 📊 Segment Analysis Summary")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        avg_engagement = sum(s.engagement_score for s in agent_segments) / len(agent_segments)
+        st.metric("Avg Engagement", f"{avg_engagement:.1f}/10")
+    
+    with col2:
+        avg_enjoyment = sum(s.enjoyment_score for s in agent_segments) / len(agent_segments)
+        st.metric("Avg Enjoyment", f"{avg_enjoyment:.1f}/10")
+    
+    with col3:
+        avg_combined = sum(s.combined_score for s in agent_segments) / len(agent_segments)
+        st.metric("Avg Combined", f"{avg_combined:.1f}/20")
+    
+    top_segment = max(agent_segments, key=lambda x: x.combined_score)
+    st.success(f"🏆 **Best Segment**: Segment {top_segment.segment_id} with combined score of {top_segment.combined_score}/20")
+    
+    # Show some interesting insights
+    st.markdown("### 🔍 Conversation Insights")
+    
+    # Most common interaction type
+    interaction_types = [s.interaction_type for s in agent_segments]
+    most_common_type = max(set(interaction_types), key=interaction_types.count)
+    st.info(f"**Most Common Interaction**: {most_common_type}")
+    
+    # Highest engagement segment details
+    best_engagement = max(agent_segments, key=lambda x: x.engagement_score)
+    if hasattr(best_engagement, 'start_line') and hasattr(best_engagement, 'end_line'):
+        st.info(f"**Highest Engagement**: Segment {best_engagement.segment_id} about '{best_engagement.topic}' ({best_engagement.engagement_score}/10) - Lines {best_engagement.start_line}-{best_engagement.end_line}")
+    else:
+        st.info(f"**Highest Engagement**: Segment {best_engagement.segment_id} about '{best_engagement.topic}' ({best_engagement.engagement_score}/10)")
+    
+    # Show segment coverage
+    if agent_segments and hasattr(agent_segments[0], 'start_line'):
+        total_conversation_lines = max(s.end_line for s in agent_segments if hasattr(s, 'end_line')) + 1
+        st.info(f"**Conversation Coverage**: {len(agent_segments)} segments covering {total_conversation_lines} conversation lines")
+    
+    # Add a note about how these segments are used
+    st.info("""
+    💡 **How this works**: The AI agent analyzes your conversation and breaks it into meaningful segments. 
+    Each segment gets scored for engagement and enjoyment. The top-scoring segments are then used 
+    to generate contextually appropriate follow-up suggestions. Content is extracted programmatically 
+    based on line boundaries identified by the AI.
+    """)
+
 def main():
     """Main Streamlit application."""
     
@@ -712,7 +941,7 @@ def main():
                         
                         # Generate intelligent follow-ups using agents
                         with st.spinner("Generating intelligent follow-ups..."):
-                            session_data['follow_ups'] = generate_intelligent_follow_ups(conversation, followup_generator)
+                            session_data['follow_ups'], session_data['agent_segments'] = generate_intelligent_follow_ups_and_segments(conversation, followup_generator)
                         
                         # Log summary generation
                         storage.log_interaction({
@@ -721,6 +950,7 @@ def main():
                             'number_of_segments': len(valid_segments),
                             'invalid_segments': len(segments) - len(valid_segments),
                             'number_of_followups': len(session_data['follow_ups']),
+                            'number_of_agent_segments': len(session_data.get('agent_segments', [])),
                             'agents_available': AGENTS_AVAILABLE,
                             'has_api_key': bool(hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key)
                         })
@@ -754,6 +984,7 @@ def main():
             
             st.write(f"**Summaries generated**: {'✅' if session_data['segment_summaries'] else '❌'}")
             st.write(f"**Follow-ups generated**: {'✅' if session_data['follow_ups'] else '❌'}")
+            st.write(f"**Agent segments**: {len(session_data.get('agent_segments', []))} analyzed")
             st.write(f"**Agent system**: {'✅ Available' if AGENTS_AVAILABLE else '❌ Using fallback'}")
     
     # Main content area
@@ -821,10 +1052,34 @@ def main():
                 }
                 
                 st.divider()
+            
+            # Add button to view agent conversation segments
+            st.markdown("---")
+            st.markdown("#### 🔍 Analysis Details")
+            
+            if st.button("🧠 View AI Agent Conversation Analysis", key="view_agent_segments", help="See how the AI analyzed your conversation"):
+                if session_data.get('agent_segments'):
+                    # Store the flag to show agent segments
+                    session_data['show_agent_analysis'] = True
+                    st.rerun()
+                else:
+                    if AGENTS_AVAILABLE:
+                        st.warning("⚠️ No agent analysis available. Make sure you have an OpenAI API key configured.")
+                    else:
+                        st.info("💡 Agent analysis requires the agent system. Install agent modules for detailed conversation analysis.")
+            
+            # Display agent segments if requested
+            if session_data.get('show_agent_analysis') and session_data.get('agent_segments'):
+                display_agent_conversation_segments(session_data['agent_segments'], session_data)
+                
+                # Add button to hide the analysis
+                if st.button("🔼 Hide Analysis", key="hide_agent_segments"):
+                    session_data['show_agent_analysis'] = False
+                    st.rerun()
         
         # Right column: Summary
         with col2:
-            st.header("📝 Conversation Segment Summaries")
+            st.header("Conversation Segment Summaries")
             
             if session_data['segment_summaries'] and session_data.get('segments'):
                 # Display interactive segment summaries

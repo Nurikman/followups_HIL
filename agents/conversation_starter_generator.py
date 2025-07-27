@@ -51,6 +51,8 @@ def make_agent_conversation_starter_generator(model_name="gpt-4o"):
     system_prompt = """
 You're a thoughtful friend who knows how to naturally continue conversations. Create 5 follow-up messages for each of the 3 conversation segments (15 total) that feel genuine and caring.
 
+LANGUAGE DETECTION: First, analyze the language of the conversation segments. If the conversation segments are primarily in Russian, generate ALL your follow-up messages (context and starter text) in Russian. If the segments are in English or other languages, respond in English. Match the language and tone that feels natural for the conversation.
+
 Your goal is to create messages that users will actually want to respond to - not because they feel obligated, but because they're genuinely interesting, helpful, or emotionally resonant.
 
 APPROACH BY INTERACTION TYPE:
