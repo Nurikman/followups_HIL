@@ -86,6 +86,9 @@ class SummaryGenerator:
 
 LANGUAGE DETECTION: If the dialogue segment is primarily in Russian, provide your summary in Russian. If it's in English or other languages, respond in English."""
         
+        # Enforced language code detected upstream: 'ru' or 'en'. None means auto-detect.
+        self.language_code: Optional[str] = None
+        
     def segment_conversation(self, conversation: List[Dict]) -> List[Dict]:
         """Segment conversation using expert analysis prompt and programmatic copy-pasting."""
         if not conversation:
@@ -340,7 +343,10 @@ Where start_idx and end_idx are 0-based message indices between 0 and {total_mes
             client = openai.OpenAI(api_key=st.session_state.openai_api_key)
             
             segment_text = self.format_segment_for_prompt(segment)
-            full_prompt = f"{self.segment_summary_prompt}\n\n{segment_text}"
+            # Enforce detected language if available
+            lang = self.language_code or st.session_state.get('detected_language')
+            language_directive = "Please write the summary in Russian." if lang == 'ru' else "Please write the summary in English."
+            full_prompt = f"{self.segment_summary_prompt}\n\nLANGUAGE REQUIREMENT: {language_directive}\n\n{segment_text}"
             
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -372,9 +378,14 @@ Where start_idx and end_idx are 0-based message indices between 0 and {total_mes
         all_text = " ".join([line.split(':', 1)[1].strip() for line in lines if ':' in line])
         words = all_text.lower().split()
         
-        # Detect if content is in Russian
-        russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
-        is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
+        # Enforce detected language if available
+        enforced_lang = self.language_code or st.session_state.get('detected_language')
+        if enforced_lang in ('ru', 'en'):
+            is_russian = enforced_lang == 'ru'
+        else:
+            # Auto-detect if not enforced
+            russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
+            is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
         
         if is_russian:
             # Russian topic detection
@@ -490,7 +501,11 @@ class FollowupGenerator:
             
             # Step 1: Segment and rate conversation
             deps = SegmenterRaterDeps(conversation=formatted_conversation)
-            result = await self.agent_segmenter_rater.run("Please analyze this conversation.", deps=deps)
+            # Enforce language for segmenter if detected
+            lang = st.session_state.get('detected_language')
+            language_note = "Please respond entirely in Russian (all fields)." if lang == 'ru' else "Please respond entirely in English (all fields)."
+            seg_prompt = f"Please analyze this conversation. {language_note}"
+            result = await self.agent_segmenter_rater.run(seg_prompt, deps=deps)
             segments = result.data.segments
             
             # Programmatically populate segment content based on line numbers
@@ -506,7 +521,7 @@ class FollowupGenerator:
             starters = starter_result.data
             
             # Convert ConversationStarter objects to strings
-            followup_strings = [starter.starter for starter in starters[:5]]  # Take top 5
+            followup_strings = [starter.starter for starter in starters]  # Show all generated
             
             return followup_strings, segments
             
@@ -550,12 +565,17 @@ class FollowupGenerator:
     def generate_fallback_followups(self, conversation: List[Dict] = None) -> List[str]:
         """Generate fallback follow-ups when agents are not available."""
         
-        # Detect if conversation is in Russian
+        # Determine language from detected value first
+        lang = st.session_state.get('detected_language')
         is_russian = False
-        if conversation:
-            all_text = " ".join([msg.get('message', '') for msg in conversation])
-            russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
-            is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
+        if lang in ('ru', 'en'):
+            is_russian = lang == 'ru'
+        else:
+            # Heuristic detection if not provided
+            if conversation:
+                all_text = " ".join([msg.get('message', '') for msg in conversation])
+                russian_words = ['что', 'как', 'где', 'когда', 'почему', 'да', 'нет', 'хорошо', 'плохо', 'спасибо', 'пожалуйста', 'привет', 'пока', 'здравствуйте', 'до свидания']
+                is_russian = any(word in all_text.lower() for word in russian_words) or any(ord(char) >= 1040 and ord(char) <= 1103 for char in all_text)
         
         if is_russian:
             return [
@@ -857,6 +877,38 @@ def display_agent_conversation_segments(agent_segments: List, session_data: Dict
     based on line boundaries identified by the AI.
     """)
 
+# Helper: detect dominant language ('ru' or 'en') using OpenAI if available, else heuristic
+def detect_conversation_language(conversation: List[Dict]) -> str:
+    try:
+        # Use OpenAI if key is present
+        if hasattr(st.session_state, 'openai_api_key') and st.session_state.openai_api_key:
+            client = openai.OpenAI(api_key=st.session_state.openai_api_key)
+            # Sample first N messages to keep prompt compact
+            sample = conversation[:50]
+            text = "\n".join(f"{m['speaker']}: {m['message']}" for m in sample)
+            user_prompt = (
+                "Determine the dominant language in this dialogue (consider both speakers). "
+                "Return exactly 'ru' for Russian or 'en' for English. No other text.\n\n" + text
+            )
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a strict language detector. Reply with 'ru' or 'en' only."},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=2,
+                temperature=0.0
+            )
+            code = resp.choices[0].message.content.strip().lower()
+            return 'ru' if code.startswith('ru') else 'en'
+        
+    except Exception as e:
+        st.warning(f"Language detection via API failed: {e}. Falling back to heuristic.")
+    
+    # Heuristic fallback (Cyrillic presence)
+    all_text = " ".join((m.get('message', '') or '') for m in conversation)
+    return 'ru' if any(ord(c) >= 1040 and ord(c) <= 1103 for c in all_text) else 'en'
+
 def main():
     """Main Streamlit application."""
     
@@ -922,6 +974,13 @@ def main():
                     with st.spinner("Generating segment-based AI summaries..."):
                         # Show conversation statistics
                         st.info(f"📊 Conversation contains {len(conversation)} messages (indices 0-{len(conversation)-1})")
+                        
+                        # Detect and store dominant language
+                        detected_lang = detect_conversation_language(conversation)
+                        st.session_state['detected_language'] = detected_lang
+                        # Apply to summary generator
+                        summary_generator.language_code = detected_lang
+                        st.info(f"🌐 Detected language: {'Russian' if detected_lang == 'ru' else 'English'}")
                         
                         # Generate segment-based summaries
                         summaries, segments = generate_segmented_summaries(
