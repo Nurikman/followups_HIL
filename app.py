@@ -462,9 +462,9 @@ class FollowupGenerator:
     
     def __init__(self, model_name="gpt-4o"):
         self.model_name = model_name
-        if AGENTS_AVAILABLE:
-            self.agent_segmenter_rater = make_agent_chat_segmenter_rater(model_name=model_name)
-            self.agent_starter_generator = make_agent_conversation_starter_generator(model_name=model_name)
+        # Defer agent initialization until API key is available
+        self.agent_segmenter_rater = None
+        self.agent_starter_generator = None
     
     def format_conversation_for_agents(self, conversation: List[Dict]) -> str:
         """Convert Streamlit conversation format to agent-expected format."""
@@ -495,6 +495,12 @@ class FollowupGenerator:
             elif not os.getenv('OPENAI_API_KEY'):
                 st.warning("⚠️ No OpenAI API key available for agents. Using fallback followups.")
                 return self.generate_fallback_followups(conversation), []
+            
+            # Initialize agents lazily after API key is present
+            if self.agent_segmenter_rater is None:
+                self.agent_segmenter_rater = make_agent_chat_segmenter_rater(model_name=self.model_name)
+            if self.agent_starter_generator is None:
+                self.agent_starter_generator = make_agent_conversation_starter_generator(model_name=self.model_name)
             
             # Format conversation for agents
             formatted_conversation = self.format_conversation_for_agents(conversation)
