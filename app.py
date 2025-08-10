@@ -942,6 +942,7 @@ def main():
         
         if api_key:
             st.session_state.openai_api_key = api_key
+            os.environ['OPENAI_API_KEY'] = api_key
             st.success("✅ API key configured")
         elif hasattr(st.session_state, 'openai_api_key'):
             st.info("🔑 Using previously entered API key")
