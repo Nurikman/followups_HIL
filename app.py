@@ -1145,7 +1145,7 @@ def main():
         
         # Right column: Summary
         with col2:
-            st.header("Conversation Segment Summaries")
+            st.header("📃 Conversation Segment Summaries")
             
             if session_data['segment_summaries'] and session_data.get('segments'):
                 # Display interactive segment summaries
