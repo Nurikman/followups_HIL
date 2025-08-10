@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pydantic_ai import RunContext, Agent
 from pydantic import BaseModel
 
-from openai_model import get_openai_model
+# from openai_model import get_openai_model  # Removed to avoid env dependency
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -81,7 +81,7 @@ def populate_segment_content(segments: List[ConversationSegment], conversation: 
 
 def make_agent_chat_segmenter_rater(model_name="gpt-4o"):
     agent = Agent(
-        get_openai_model(model_name),
+        model_name,  # Pass model name directly; API key is set by the app
         deps_type=SegmenterRaterDeps,
         retries=3,
         result_type=SegmenterRaterResult,

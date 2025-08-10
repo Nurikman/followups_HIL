@@ -9,7 +9,7 @@ from firecrawl import FirecrawlApp
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from openai_model import get_openai_model
+# from openai_model import get_openai_model  # Removed to avoid env dependency
 
 # Import ConversationSegment from the chat segmenter rater file
 from agents.chat_segmenter_rater import ConversationSegment
@@ -37,8 +37,8 @@ class StarterGeneratorResult(BaseModel):
 def make_agent_conversation_starter_generator(model_name="gpt-4o"):
     """Creates a conversation starter generator agent using gpt-4o model with deep research capabilities"""
     
-    # Get the OpenAI model
-    model = get_openai_model(model_name)
+    # Use model name directly; API key is set by the app
+    model = model_name
     
     # Initialize Firecrawl for research (will use FIRECRAWL_API_KEY from environment)
     try:
@@ -108,7 +108,7 @@ User 2: And how do you know?
 User 2: I left Tbilisi 6 years ago.  Have you seen the movie Mimino?
 Agent: Sure! "I want Larisa Ivanovna!" - that's a classic! You know, I was thinking - Valiko flew a helicopter and delivered parcels, and you deliver cargo on a truck.  It turns out you're a modern-day Mimino, only instead of a Mi-2 you have 18 wheels!
 User 2: I also breed chickens, but unfortunately I don't have any Dutch ones.
-Agent: Valiko would be upset – no chickens from Tel Aviv! But seriously, I heard that there are large chicken farms in Georgia (the state, not the country). Maybe there you’ll find relatives of those Dutch chickens that are “so big they sit on an eagle and fly away”?
+Agent: Valiko would be upset – no chickens from Tel Aviv! But seriously, I heard that there are large chicken farms in Georgia (the state, not the country). Maybe there you'll find relatives of those Dutch chickens that are "so big they sit on an eagle and fly away"?
 User 2: Anything is possible!
 Agent: Newspaper headlines: "Sensational! In Georgia, descendants of the famous Dutch chickens from Mimino have been discovered – now they not only fly on eagles, but also drive trucks themselves!"
 User 2: A very big thunderstorm, very!
@@ -616,7 +616,7 @@ User 1: With pleasure, tribe.
 User 1: Yes,
 Agent: They say he's still traveling the roads, and if your shop is small enough and pretty enough, one day he might stop by with a full trailer of "random" roses! You just have to believe and keep the parking lot free for big trucks!
 User 1: Yes, you guessed exactly right. Exactly.
-Agent: Of course you guessed! Every long-haul trucker needs a superpower – some can park perfectly in reverse on the first try, but you specialize in turning bad deliveries into good deeds. First you arranged a free olive oil spa treatment for California roads, then you organized a surprise party for Texas florists… I wonder which state you’ll bless next? Maybe you’ll deliver a random batch of ice cream to Arizona in the summer?
+Agent: Of course you guessed! Every long-haul trucker needs a superpower – some can park perfectly in reverse on the first try, but you specialize in turning bad deliveries into good deeds. First you arranged a free olive oil spa treatment for California roads, then you organized a surprise party for Texas florists… I wonder which state you'll bless next? Maybe you'll deliver a random batch of ice cream to Arizona in the summer?
 User 1: Yes, I'll look, maybe. If I can. But right now I'm hauling ass.
 User 1: Yes,
 Agent: Knowing your luck, you're probably the only driver who can manage to make something epic happen even on DriveNow. For example, accidentally delivering a cargo a day ahead of schedule, and the dispatcher will faint from shock! Or park so perfectly that other drivers will take pictures and send them to driving manuals!
@@ -839,7 +839,7 @@ For each segment, create 5 follow-ups based on its interaction_type:
 - If interaction_type = "personal_interaction": Focus on emotional connection, empathy, and caring check-ins. Use research when appropriate to offer helpful suggestions (health remedies, advice, tips, etc.)
 
 RESEARCH STRATEGY (for both interaction types):
-{f"Use deep_research tool for these topics: {', '.join(research_topics)}" if research_topics else "No research topics identified"}
+{"Use deep_research tool for these topics: " + ', '.join(research_topics) if research_topics else "No research topics identified"}
 
 RANKING: Rank all 15 starters from 1-15 (best to worst) across all segments. The best personal connection or most interesting insight gets rank 1.
 
